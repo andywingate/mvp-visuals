@@ -1,6 +1,9 @@
 name: Scrape MVP data and update GitHub Pages
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     # Run at 02:00 UTC every Sunday
     - cron: "0 2 * * 0"
@@ -10,6 +13,10 @@ on:
         description: "Maximum number of profiles to fetch (leave blank for all)"
         required: false
         default: ""
+
+concurrency:
+  group: scrape-and-deploy
+  cancel-in-progress: true
 
 jobs:
   scrape-and-deploy:

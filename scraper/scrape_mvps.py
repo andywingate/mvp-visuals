@@ -211,7 +211,7 @@ def main() -> None:
 
     # Stamp the update time using a simple ISO-8601 string
     import datetime
-    output["lastUpdated"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    output["lastUpdated"] = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
