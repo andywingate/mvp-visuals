@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Microsoft MVP Visuals</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #f4f6f9;
+      color: #1a1a1a;
+    }
+
+    header {
+      background: #0078d4;
+      color: #fff;
+      padding: 1.25rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header img { height: 2.5rem; }
+    header h1 { font-size: 1.6rem; font-weight: 600; }
+    header p  { font-size: 0.85rem; opacity: 0.85; margin-top: 0.15rem; }
+
+    .meta-bar {
+      background: #fff;
+      border-bottom: 1px solid #e0e0e0;
+      padding: 0.6rem 2rem;
+      font-size: 0.85rem;
+      color: #555;
+      display: flex;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+    .meta-bar span strong { color: #1a1a1a; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+      gap: 1.5rem;
+      padding: 1.5rem 2rem;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+      padding: 1.25rem 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #0078d4;
+      border-bottom: 2px solid #e8f0fc;
+      padding-bottom: 0.5rem;
+    }
+    .card .chart-wrap {
+      position: relative;
+      height: 320px;
+    }
+
+    /* Make the region chart taller so country labels fit */
+    .card.tall .chart-wrap { height: 520px; }
+
+    .empty-msg {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: #777;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+    .empty-msg a { color: #0078d4; }
+
+    footer {
+      text-align: center;
+      padding: 1.5rem;
+      font-size: 0.8rem;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Microsoft MVP Visuals</h1>
+    <p>An open-source visualisation of publicly available Microsoft MVP data</p>
+  </div>
+</header>
+
+<div class="meta-bar">
+  <span>Total MVPs: <strong id="totalCount">—</strong></span>
+  <span>Countries / Regions: <strong id="countryCount">—</strong></span>
+  <span>Technology areas: <strong id="techCount">—</strong></span>
+  <span>Last updated: <strong id="lastUpdated">—</strong></span>
+</div>
+
+<div class="grid">
+  <div class="card tall">
+    <h2>MVPs by Country / Region (Top 30)</h2>
+    <div class="chart-wrap">
+      <canvas id="chartCountry"></canvas>
+    </div>
+  </div>
+
+  <div class="card tall">
+    <h2>MVPs by Technology Area (Top 30)</h2>
+    <div class="chart-wrap">
+      <canvas id="chartTech"></canvas>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>MVPs by Length of Service</h2>
+    <div class="chart-wrap">
+      <canvas id="chartYears"></canvas>
+    </div>
+  </div>
+</div>
+
+<footer>
+  Data sourced from the public
+  <a href="https://mvp.microsoft.com/en-US/search?target=Profile&program=MVP" target="_blank" rel="noopener">
+    Microsoft MVP directory
+  </a>.
+  Visualisation by
+  <a href="https://github.com/andywingate/mvp-visuals" target="_blank" rel="noopener">mvp-visuals</a>.
+</footer>
+
+<script>
+  /* ── Palette helpers ── */
+  const BLUE_SHADES = (n) => {
+    const base = [
+      "#0078d4","#106ebe","#2b88d8","#71afe5","#c7e0f4",
+      "#004578","#005a9e","#0091e8","#3aa0f3","#83bef0",
+    ];
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(base[i % base.length]);
+    return out;
+  };
+
+  const MULTI_PALETTE = (n) => {
+    const pool = [
+      "#0078d4","#e74c3c","#2ecc71","#f39c12","#9b59b6",
+      "#1abc9c","#e67e22","#3498db","#e91e63","#00bcd4",
+      "#8bc34a","#ff5722","#607d8b","#795548","#009688",
+      "#ff9800","#673ab7","#03a9f4","#4caf50","#f44336",
+    ];
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(pool[i % pool.length]);
+    return out;
+  };
+
+  /* ── Sort and take top-N entries from an object ── */
+  function topN(obj, n) {
+    return Object.entries(obj)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, n);
+  }
+
+  /* ── Create a horizontal bar chart ── */
+  function makeBarChart(id, labels, data, palette) {
+    const ctx = document.getElementById(id).getContext("2d");
+    return new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{
+          data,
+          backgroundColor: palette(labels.length),
+          borderRadius: 3,
+        }],
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => ` ${ctx.parsed.x.toLocaleString()} MVPs`,
+            },
+          },
+        },
+        scales: {
+          x: { grid: { display: false } },
+          y: { ticks: { font: { size: 11 } } },
+        },
+      },
+    });
+  }
+
+  /* ── Create a doughnut chart ── */
+  function makeDoughnut(id, labels, data) {
+    const ctx = document.getElementById(id).getContext("2d");
+    return new Chart(ctx, {
+      type: "doughnut",
+      data: {
+        labels,
+        datasets: [{
+          data,
+          backgroundColor: MULTI_PALETTE(labels.length),
+          hoverOffset: 8,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: "right",
+            labels: { font: { size: 12 }, boxWidth: 14 },
+          },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+                const pct = total ? ((ctx.parsed / total) * 100).toFixed(1) : 0;
+                return ` ${ctx.label}: ${ctx.parsed.toLocaleString()} (${pct}%)`;
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  /* ── Render all charts from data ── */
+  function renderCharts(mvpData) {
+    const { summary, totalProfiles, lastUpdated } = mvpData;
+
+    /* Meta bar */
+    document.getElementById("totalCount").textContent =
+      (totalProfiles || 0).toLocaleString();
+    document.getElementById("countryCount").textContent =
+      Object.keys(summary.byCountry || {}).length.toLocaleString();
+    document.getElementById("techCount").textContent =
+      Object.keys(summary.byTechArea || {}).length.toLocaleString();
+    document.getElementById("lastUpdated").textContent =
+      lastUpdated ? new Date(lastUpdated).toLocaleDateString() : "—";
+
+    const hasData = totalProfiles && totalProfiles > 0;
+
+    if (!hasData) {
+      document.querySelectorAll(".chart-wrap").forEach((el) => {
+        el.innerHTML =
+          '<p class="empty-msg">No data yet. ' +
+          'Run the <a href="https://github.com/andywingate/mvp-visuals/tree/main/scraper">scraper</a> ' +
+          'to populate <code>docs/data/mvps.json</code>.</p>';
+      });
+      return;
+    }
+
+    /* By Country (top 30 horizontal bar) */
+    const country30 = topN(summary.byCountry || {}, 30);
+    makeBarChart(
+      "chartCountry",
+      country30.map((e) => e[0]),
+      country30.map((e) => e[1]),
+      BLUE_SHADES
+    );
+
+    /* By Tech Area (top 30 horizontal bar) */
+    const tech30 = topN(summary.byTechArea || {}, 30);
+    makeBarChart(
+      "chartTech",
+      tech30.map((e) => e[0]),
+      tech30.map((e) => e[1]),
+      MULTI_PALETTE
+    );
+
+    /* By Length of Service (doughnut) */
+    const SERVICE_ORDER = [
+      "1 year", "2–3 years", "4–5 years", "6–10 years", "10+ years", "Unknown",
+    ];
+    const svc = summary.byLengthOfService || {};
+    const svcLabels = SERVICE_ORDER.filter((k) => k in svc);
+    const svcData   = svcLabels.map((k) => svc[k]);
+    makeDoughnut("chartYears", svcLabels, svcData);
+  }
+
+  /* ── Bootstrap ── */
+  fetch("data/mvps.json")
+    .then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then(renderCharts)
+    .catch((err) => {
+      console.error("Failed to load MVP data:", err);
+      document.querySelectorAll(".chart-wrap").forEach((el) => {
+        el.innerHTML =
+          `<p class="empty-msg">⚠ Could not load data: ${err.message}</p>`;
+      });
+    });
+</script>
+</body>
+</html>
