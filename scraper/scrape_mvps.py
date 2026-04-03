@@ -6,30 +6,38 @@ visualisation site.
 Usage:
     python scrape_mvps.py [--out PATH] [--top N] [--delay SECONDS]
 
-The script pages through the Maven/MVP search API until it has fetched
-every profile or until the optional --top limit is reached.
+The script uses a two-phase approach:
+  Phase 1 – Page through the search endpoint to collect all MVP profile IDs.
+  Phase 2 – Fetch enriched detail (years in programme, award category,
+            technology focus areas) for each profile.
 """
 
 import argparse
 import json
+import math
 import os
 import time
 import sys
 
 import requests
 
-API_URL = (
-    "https://mavenapi-prod.azurewebsites.net/api/v2/search/Profiles"
+SEARCH_URL = (
+    "https://mavenapi-prod.azurewebsites.net/api/CommunityLeaders/search/"
+)
+PROFILE_URL = (
+    "https://mavenapi-prod.azurewebsites.net/api/mvp/UserProfiles/public/{uuid}"
+)
+MVP_PROFILE_PAGE = (
+    "https://mvp.microsoft.com/en-US/MVP/profile/{uuid}"
 )
 DEFAULT_PAGE_SIZE = 100
-# Approximate current award year; update when a new MVP award year begins.
-CURRENT_YEAR = 2025
 DEFAULT_OUT = os.path.join(
     os.path.dirname(__file__), "..", "docs", "data", "mvps.json"
 )
 
 HEADERS = {
     "Accept": "application/json",
+    "Content-Type": "application/json",
     "User-Agent": (
         "Mozilla/5.0 (compatible; mvp-visuals-scraper/1.0; "
         "+https://github.com/andywingate/mvp-visuals)"
@@ -37,65 +45,102 @@ HEADERS = {
 }
 
 
-def fetch_page(skip: int, page_size: int, session: requests.Session) -> dict:
-    """Fetch one page of MVP search results."""
-    params = {
-        "$skip": skip,
-        "$top": page_size,
-        "searchText": "",
-        "program": "MVP",
-        "targetType": "Profile",
+def fetch_search_page(
+    page_index: int, page_size: int, session: requests.Session
+) -> dict:
+    """POST to the search endpoint and return the JSON response."""
+    payload = {
+        "searchKey": "",
+        "academicInstitution": "",
+        "program": ["MVP"],
+        "countryRegionList": [],
+        "academicCountryRegionList": [],
+        "industryFocusList": [],
+        "languagesList": [],
+        "milestonesList": [],
+        "pageIndex": page_index,
+        "pageSize": page_size,
+        "stateProvinceList": [],
+        "technicalExpertiseList": [],
+        "technologyFocusAreaGroupList": [],
+        "technologyFocusAreaList": [],
     }
-    response = session.get(API_URL, params=params, headers=HEADERS, timeout=30)
+    response = session.post(
+        SEARCH_URL, json=payload, headers=HEADERS, timeout=30
+    )
     response.raise_for_status()
     return response.json()
 
 
-def extract_profile(raw: dict) -> dict:
-    """Extract the fields we care about from a raw API profile object."""
-    award_years = raw.get("awardRecognitionYear") or raw.get("firstAwardYear") or 0
-    consecutive = raw.get("numberOfConsecutiveAwards") or 0
+def fetch_profile_detail(
+    uuid: str, session: requests.Session
+) -> dict:
+    """GET enriched profile detail for a single MVP."""
+    url = PROFILE_URL.format(uuid=uuid)
+    response = session.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    return response.json()
 
-    # Technology areas may come back as a list or a comma-separated string
-    tech_areas = raw.get("awardCategoryCollection") or []
-    if isinstance(tech_areas, str):
-        tech_areas = [t.strip() for t in tech_areas.split(",") if t.strip()]
+
+def extract_search_profile(raw: dict) -> dict:
+    """Extract the fields we care about from a search-result profile."""
+    uuid = raw.get("userProfileIdentifier") or ""
+    first = (raw.get("firstName") or "").strip()
+    last = (raw.get("lastName") or "").strip()
+    display = f"{first} {last}".strip() if (first or last) else ""
 
     return {
-        "id": raw.get("mvpId") or raw.get("userKey") or "",
-        "displayName": raw.get("displayName") or "",
-        "country": raw.get("country") or raw.get("countryRegionName") or "",
-        "stateOrProvince": raw.get("stateOrProvince") or "",
-        "city": raw.get("city") or "",
-        "techAreas": tech_areas,
-        "firstAwardYear": award_years,
-        "consecutiveYears": consecutive,
-        "profileUrl": raw.get("userUrl") or raw.get("mvpProfileUrl") or "",
+        "id": uuid,
+        "displayName": display,
+        "country": raw.get("addressCountryOrRegionName") or "",
+        "profileUrl": MVP_PROFILE_PAGE.format(uuid=uuid) if uuid else "",
+        # Enriched in Phase 2:
+        "yearsInProgram": 0,
+        "awardCategory": "",
+        "techAreas": [],
     }
+
+
+def enrich_profile(profile: dict, detail: dict) -> dict:
+    """Merge detail-endpoint data into a search profile."""
+    user = detail.get("userProfile") or {}
+    profile["yearsInProgram"] = user.get("yearsInProgram") or 0
+    profile["awardCategory"] = user.get("awardCategory") or ""
+    tech = user.get("technologyFocusArea") or []
+    if isinstance(tech, str):
+        tech = [t.strip() for t in tech.split(",") if t.strip()]
+    profile["techAreas"] = tech
+    return profile
 
 
 def scrape(
     top: int | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
-    delay: float = 0.5,
+    delay: float = 0.2,
 ) -> list[dict]:
-    """Page through the API and return a list of extracted profile dicts."""
+    """Two-phase scrape: search for all profiles then enrich each one."""
     profiles: list[dict] = []
-    skip = 0
-    total = None
 
     with requests.Session() as session:
+        # ── Phase 1: collect profiles via search endpoint ──
+        page_index = 1
+        total = None
+
         while True:
-            fetch_size = page_size
+            current_page_size = page_size
             if top is not None:
                 remaining = top - len(profiles)
                 if remaining <= 0:
                     break
-                fetch_size = min(page_size, remaining)
+                current_page_size = min(page_size, remaining)
 
-            print(f"Fetching records {skip}–{skip + fetch_size - 1} …", flush=True)
+            print(
+                f"[Phase 1] Fetching search page {page_index} "
+                f"(pageSize={current_page_size}) …",
+                flush=True,
+            )
             try:
-                data = fetch_page(skip, fetch_size, session)
+                data = fetch_search_page(page_index, current_page_size, session)
             except requests.HTTPError as exc:
                 print(f"HTTP error: {exc}", file=sys.stderr)
                 break
@@ -103,26 +148,64 @@ def scrape(
                 print(f"Request error: {exc}", file=sys.stderr)
                 break
 
-            items = data.get("value") or data.get("profiles") or []
             if total is None:
-                total = data.get("totalCount") or data.get("@odata.count") or 0
-                print(f"Total profiles reported by API: {total}", flush=True)
+                total = data.get("filteredCount") or 0
+                total_pages = math.ceil(total / page_size) if total else 0
+                print(
+                    f"Total MVPs reported by API: {total} "
+                    f"({total_pages} pages)",
+                    flush=True,
+                )
 
+            items = data.get("communityLeaderProfiles") or []
             if not items:
                 break
 
             for item in items:
-                profiles.append(extract_profile(item))
+                profiles.append(extract_search_profile(item))
 
-            skip += len(items)
-
-            if total and skip >= total:
+            if top is not None and len(profiles) >= top:
+                profiles = profiles[:top]
                 break
-            if len(items) < fetch_size:
-                # API returned fewer items than requested → last page
+            if page_index >= math.ceil(total / page_size) if total else False:
                 break
 
+            page_index += 1
             time.sleep(delay)
+
+        print(
+            f"[Phase 1] Collected {len(profiles)} profiles.", flush=True
+        )
+
+        # ── Phase 2: enrich each profile with detail endpoint ──
+        enriched = 0
+        for i, profile in enumerate(profiles):
+            uuid = profile["id"]
+            if not uuid:
+                continue
+            print(
+                f"[Phase 2] Enriching profile {i + 1}/{len(profiles)}: "
+                f"{profile['displayName']} …",
+                flush=True,
+            )
+            try:
+                detail = fetch_profile_detail(uuid, session)
+                enrich_profile(profile, detail)
+                enriched += 1
+            except requests.HTTPError as exc:
+                print(
+                    f"  ⚠ HTTP error for {uuid}: {exc}", file=sys.stderr
+                )
+            except requests.RequestException as exc:
+                print(
+                    f"  ⚠ Request error for {uuid}: {exc}", file=sys.stderr
+                )
+            time.sleep(delay)
+
+        print(
+            f"[Phase 2] Enriched {enriched}/{len(profiles)} profiles.",
+            flush=True,
+        )
 
     return profiles
 
@@ -133,22 +216,15 @@ def build_summary(profiles: list[dict]) -> dict:
     by_tech: dict[str, int] = {}
     by_years: dict[str, int] = {}
 
-    current_year = CURRENT_YEAR
-
     for p in profiles:
-        country = p["country"] or "Unknown"
+        country = p.get("country") or "Unknown"
         by_country[country] = by_country.get(country, 0) + 1
 
-        for tech in p["techAreas"]:
+        for tech in p.get("techAreas") or []:
             by_tech[tech] = by_tech.get(tech, 0) + 1
 
-        first = p["firstAwardYear"]
-        if first and isinstance(first, int) and first > 0:
-            length = current_year - first + 1
-        else:
-            length = p["consecutiveYears"] or 0
-
-        bucket = _years_bucket(length)
+        years = p.get("yearsInProgram") or 0
+        bucket = _years_bucket(years)
         by_years[bucket] = by_years.get(bucket, 0) + 1
 
     return {
@@ -189,13 +265,13 @@ def main() -> None:
         "--page-size",
         type=int,
         default=DEFAULT_PAGE_SIZE,
-        help="Number of profiles to request per API call (default: 100)",
+        help="Number of profiles to request per search page (default: 100)",
     )
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.5,
-        help="Seconds to wait between API requests (default: 0.5)",
+        default=0.2,
+        help="Seconds to wait between API requests (default: 0.2)",
     )
     args = parser.parse_args()
 
