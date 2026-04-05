@@ -1,7 +1,6 @@
 {
-  "lastUpdated": "2025-01-01T00:00:00Z",
+  "lastUpdated": "2026-04-05T03:12:47Z",
   "totalProfiles": 0,
-  "note": "Run the scraper (scraper/scrape_mvps.py) to populate this file with live data.",
   "summary": {
     "byCountry": {},
     "byTechArea": {},
