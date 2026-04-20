@@ -45,8 +45,8 @@ pip install -r scraper/requirements.txt
 # Fetch all profiles (writes docs/data/mvps.json)
 python scraper/scrape_mvps.py
 
-# Fetch only the first 500 profiles (useful for testing)
-python scraper/scrape_mvps.py --top 500
+# Fetch only the first 50 profiles (useful for testing)
+python scraper/scrape_mvps.py --top 50
 
 # Custom output path
 python scraper/scrape_mvps.py --out /tmp/mvps.json
@@ -58,31 +58,29 @@ python scraper/scrape_mvps.py --out /tmp/mvps.json
 |------|---------|-------------|
 | `--out` | `docs/data/mvps.json` | Output JSON file path |
 | `--top` | *(all)* | Maximum number of profiles to fetch |
-| `--page-size` | `100` | Profiles per API request |
-| `--delay` | `0.5` | Seconds to wait between requests |
+| `--page-size` | `100` | Profiles per search page |
+| `--delay` | `0.2` | Seconds to wait between requests |
 
 ## Data format (`docs/data/mvps.json`)
 
 ```jsonc
 {
   "lastUpdated": "2025-01-01T00:00:00Z",
-  "totalProfiles": 3500,
+  "totalProfiles": 4060,
   "summary": {
     "byCountry":         { "United States": 800, … },
-    "byTechArea":        { "Azure": 600, … },
+    "byTechArea":        { "Excel": 120, … },
     "byLengthOfService": { "1 year": 120, "2–3 years": 340, … }
   },
   "profiles": [
     {
-      "id": "…",
-      "displayName": "Jane Doe",
-      "country": "United States",
-      "stateOrProvince": "WA",
-      "city": "Seattle",
-      "techAreas": ["Azure", "Developer Technologies"],
-      "firstAwardYear": 2018,
-      "consecutiveYears": 7,
-      "profileUrl": "https://mvp.microsoft.com/…"
+      "id": "791c111d-ed9f-ea11-a811-000d3a8dfe0d",
+      "displayName": "Alan Murray",
+      "country": "United Kingdom",
+      "yearsInProgram": 7,
+      "awardCategory": "M365",
+      "techAreas": ["Excel"],
+      "profileUrl": "https://mvp.microsoft.com/en-US/MVP/profile/791c111d-…"
     }
   ]
 }
@@ -92,9 +90,9 @@ python scraper/scrape_mvps.py --out /tmp/mvps.json
 
 The workflow in `.github/workflows/scrape.yml`:
 
-1. Runs **every Sunday at 02:00 UTC** (and can be triggered manually).
+1. Runs **every Sunday at 02:00 UTC**, on every push to **main**, and can be triggered manually.
 2. Installs Python dependencies.
-3. Executes the scraper to refresh `docs/data/mvps.json`.
+3. Executes the scraper to refresh `docs/data/mvps.json` (Phase 1: search, Phase 2: enrich each profile).
 4. Commits the updated data file back to the repository.
 5. Deploys the `docs/` folder to GitHub Pages.
 
