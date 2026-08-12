@@ -14,7 +14,12 @@ import unittest
 # Allow imports from the scraper directory
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scrape_mvps import _years_bucket, extract_profile, build_summary, CURRENT_YEAR
+from scrape_mvps import (
+    _years_bucket,
+    extract_search_profile,
+    enrich_profile,
+    build_summary,
+)
 
 
 class TestYearsBucket(unittest.TestCase):
@@ -28,67 +33,114 @@ class TestYearsBucket(unittest.TestCase):
         self.assertEqual(_years_bucket(1), "1 year")
 
     def test_two_to_three_years(self):
-        self.assertEqual(_years_bucket(2), "2–3 years")
-        self.assertEqual(_years_bucket(3), "2–3 years")
+        self.assertEqual(_years_bucket(2), "2\u20133 years")
+        self.assertEqual(_years_bucket(3), "2\u20133 years")
 
     def test_four_to_five_years(self):
-        self.assertEqual(_years_bucket(4), "4–5 years")
-        self.assertEqual(_years_bucket(5), "4–5 years")
+        self.assertEqual(_years_bucket(4), "4\u20135 years")
+        self.assertEqual(_years_bucket(5), "4\u20135 years")
 
     def test_six_to_ten_years(self):
-        self.assertEqual(_years_bucket(6), "6–10 years")
-        self.assertEqual(_years_bucket(10), "6–10 years")
+        self.assertEqual(_years_bucket(6), "6\u201310 years")
+        self.assertEqual(_years_bucket(10), "6\u201310 years")
 
     def test_over_ten_years(self):
         self.assertEqual(_years_bucket(11), "10+ years")
         self.assertEqual(_years_bucket(25), "10+ years")
 
 
-class TestExtractProfile(unittest.TestCase):
+class TestExtractSearchProfile(unittest.TestCase):
     def _raw(self, **overrides):
         base = {
-            "mvpId": "abc123",
-            "displayName": "Jane Doe",
-            "country": "United States",
-            "stateOrProvince": "WA",
-            "city": "Seattle",
-            "awardCategoryCollection": ["Azure", "Developer Technologies"],
-            "awardRecognitionYear": 2018,
-            "numberOfConsecutiveAwards": 7,
-            "userUrl": "https://mvp.microsoft.com/jane-doe",
+            "userProfileIdentifier": "791c111d-ed9f-ea11-a811-000d3a8dfe0d",
+            "firstName": "Alan",
+            "lastName": "Murray",
+            "addressCountryOrRegionName": "United Kingdom",
         }
         base.update(overrides)
         return base
 
     def test_basic_fields(self):
-        p = extract_profile(self._raw())
-        self.assertEqual(p["id"], "abc123")
-        self.assertEqual(p["displayName"], "Jane Doe")
-        self.assertEqual(p["country"], "United States")
-        self.assertEqual(p["stateOrProvince"], "WA")
-        self.assertEqual(p["city"], "Seattle")
-        self.assertEqual(p["techAreas"], ["Azure", "Developer Technologies"])
-        self.assertEqual(p["firstAwardYear"], 2018)
-        self.assertEqual(p["consecutiveYears"], 7)
-        self.assertEqual(p["profileUrl"], "https://mvp.microsoft.com/jane-doe")
-
-    def test_tech_areas_as_string(self):
-        p = extract_profile(self._raw(awardCategoryCollection="Azure, Security"))
-        self.assertEqual(p["techAreas"], ["Azure", "Security"])
-
-    def test_missing_id_falls_back_to_userkey(self):
-        raw = self._raw()
-        del raw["mvpId"]
-        raw["userKey"] = "fallback-key"
-        p = extract_profile(raw)
-        self.assertEqual(p["id"], "fallback-key")
+        p = extract_search_profile(self._raw())
+        self.assertEqual(p["id"], "791c111d-ed9f-ea11-a811-000d3a8dfe0d")
+        self.assertEqual(p["displayName"], "Alan Murray")
+        self.assertEqual(p["country"], "United Kingdom")
+        self.assertEqual(
+            p["profileUrl"],
+            "https://mvp.microsoft.com/en-US/MVP/profile/"
+            "791c111d-ed9f-ea11-a811-000d3a8dfe0d",
+        )
+        # Enrichment defaults
+        self.assertEqual(p["yearsInProgram"], 0)
+        self.assertEqual(p["awardCategory"], "")
+        self.assertEqual(p["techAreas"], [])
 
     def test_missing_fields_return_empty_strings(self):
-        p = extract_profile({})
+        p = extract_search_profile({})
         self.assertEqual(p["id"], "")
         self.assertEqual(p["displayName"], "")
         self.assertEqual(p["country"], "")
+        self.assertEqual(p["profileUrl"], "")
         self.assertEqual(p["techAreas"], [])
+
+    def test_first_name_only(self):
+        p = extract_search_profile(self._raw(lastName=""))
+        self.assertEqual(p["displayName"], "Alan")
+
+    def test_last_name_only(self):
+        p = extract_search_profile(self._raw(firstName=""))
+        self.assertEqual(p["displayName"], "Murray")
+
+
+class TestEnrichProfile(unittest.TestCase):
+    def _base_profile(self):
+        return {
+            "id": "abc-123",
+            "displayName": "Test User",
+            "country": "US",
+            "profileUrl": "https://mvp.microsoft.com/en-US/MVP/profile/abc-123",
+            "yearsInProgram": 0,
+            "awardCategory": "",
+            "techAreas": [],
+        }
+
+    def test_enrich_basic(self):
+        profile = self._base_profile()
+        detail = {
+            "userProfile": {
+                "yearsInProgram": 7,
+                "awardCategory": "M365",
+                "technologyFocusArea": ["Excel"],
+            }
+        }
+        result = enrich_profile(profile, detail)
+        self.assertEqual(result["yearsInProgram"], 7)
+        self.assertEqual(result["awardCategory"], "M365")
+        self.assertEqual(result["techAreas"], ["Excel"])
+
+    def test_enrich_tech_area_as_string(self):
+        profile = self._base_profile()
+        detail = {
+            "userProfile": {
+                "yearsInProgram": 2,
+                "awardCategory": "Azure",
+                "technologyFocusArea": "Azure, Security",
+            }
+        }
+        result = enrich_profile(profile, detail)
+        self.assertEqual(result["techAreas"], ["Azure", "Security"])
+
+    def test_enrich_missing_user_profile(self):
+        profile = self._base_profile()
+        result = enrich_profile(profile, {})
+        self.assertEqual(result["yearsInProgram"], 0)
+        self.assertEqual(result["awardCategory"], "")
+        self.assertEqual(result["techAreas"], [])
+
+    def test_enrich_returns_same_dict(self):
+        profile = self._base_profile()
+        result = enrich_profile(profile, {"userProfile": {}})
+        self.assertIs(result, profile)
 
 
 class TestBuildSummary(unittest.TestCase):
@@ -96,21 +148,18 @@ class TestBuildSummary(unittest.TestCase):
         return [
             {
                 "country": "US",
-                "techAreas": ["Azure", "Security"],
-                "firstAwardYear": 2024,
-                "consecutiveYears": 1,
+                "techAreas": ["Excel", "Power BI"],
+                "yearsInProgram": 2,
             },
             {
                 "country": "UK",
-                "techAreas": ["Azure"],
-                "firstAwardYear": 2010,
-                "consecutiveYears": 15,
+                "techAreas": ["Excel"],
+                "yearsInProgram": 12,
             },
             {
                 "country": "US",
-                "techAreas": ["M365"],
-                "firstAwardYear": 0,
-                "consecutiveYears": 0,
+                "techAreas": ["Python"],
+                "yearsInProgram": 0,
             },
         ]
 
@@ -121,17 +170,16 @@ class TestBuildSummary(unittest.TestCase):
 
     def test_by_tech_area(self):
         s = build_summary(self._profiles())
-        self.assertEqual(s["byTechArea"]["Azure"], 2)
-        self.assertEqual(s["byTechArea"]["Security"], 1)
-        self.assertEqual(s["byTechArea"]["M365"], 1)
+        self.assertEqual(s["byTechArea"]["Excel"], 2)
+        self.assertEqual(s["byTechArea"]["Power BI"], 1)
+        self.assertEqual(s["byTechArea"]["Python"], 1)
 
     def test_by_length_of_service(self):
         s = build_summary(self._profiles())
-        # Using CURRENT_YEAR from the module:
-        #   2024 → length = CURRENT_YEAR - 2024 + 1 = 2 → "2–3 years"
-        #   2010 → length = CURRENT_YEAR - 2010 + 1 ≥ 11 → "10+ years"
-        #   0    → length = 0 → "Unknown"
-        self.assertIn("2–3 years", s["byLengthOfService"])
+        # yearsInProgram=2 -> "2-3 years"
+        # yearsInProgram=12 -> "10+ years"
+        # yearsInProgram=0 -> "Unknown"
+        self.assertIn("2\u20133 years", s["byLengthOfService"])
         self.assertIn("10+ years", s["byLengthOfService"])
         self.assertIn("Unknown", s["byLengthOfService"])
 
