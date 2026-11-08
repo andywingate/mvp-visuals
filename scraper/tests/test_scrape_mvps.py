@@ -47,41 +47,76 @@ class TestYearsBucket(unittest.TestCase):
 class TestExtractProfile(unittest.TestCase):
     def _raw(self, **overrides):
         base = {
-            "mvpId": "abc123",
-            "displayName": "Jane Doe",
-            "country": "United States",
-            "stateOrProvince": "WA",
-            "city": "Seattle",
-            "awardCategoryCollection": ["Azure", "Developer Technologies"],
-            "awardRecognitionYear": 2018,
-            "numberOfConsecutiveAwards": 7,
-            "userUrl": "https://mvp.microsoft.com/jane-doe",
+            "userProfileIdentifier": "abc123",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "screenNameLocalized": False,
+            "addressCountryOrRegionName": "United States",
+        }
+        base.update(overrides)
+        return base
+
+    def _detail(self, **overrides):
+        base = {
+            "awardCategory": ["Azure", "Developer Technologies"],
+            "yearsInProgram": 7,
         }
         base.update(overrides)
         return base
 
     def test_basic_fields(self):
-        p = extract_profile(self._raw())
+        p = extract_profile(self._raw(), self._detail())
         self.assertEqual(p["id"], "abc123")
         self.assertEqual(p["displayName"], "Jane Doe")
         self.assertEqual(p["country"], "United States")
-        self.assertEqual(p["stateOrProvince"], "WA")
-        self.assertEqual(p["city"], "Seattle")
+        self.assertEqual(p["stateOrProvince"], "")
+        self.assertEqual(p["city"], "")
         self.assertEqual(p["techAreas"], ["Azure", "Developer Technologies"])
-        self.assertEqual(p["firstAwardYear"], 2018)
         self.assertEqual(p["consecutiveYears"], 7)
-        self.assertEqual(p["profileUrl"], "https://mvp.microsoft.com/jane-doe")
+        self.assertEqual(p["firstAwardYear"], CURRENT_YEAR - 7 + 1)
+        self.assertEqual(
+            p["profileUrl"],
+            "https://mvp.microsoft.com/en-US/mvp/profile/abc123",
+        )
+
+    def test_localized_name(self):
+        raw = self._raw(
+            screenNameLocalized=True,
+            localizedFirstName="Janeth",
+            localizedLastName="Doé",
+        )
+        p = extract_profile(raw)
+        self.assertEqual(p["displayName"], "Janeth Doé")
+
+    def test_unlocalized_name_falls_back_to_first_last(self):
+        raw = self._raw(
+            screenNameLocalized=False,
+            localizedFirstName="Janeth",
+            localizedLastName="Doé",
+        )
+        p = extract_profile(raw)
+        self.assertEqual(p["displayName"], "Jane Doe")
 
     def test_tech_areas_as_string(self):
-        p = extract_profile(self._raw(awardCategoryCollection="Azure, Security"))
+        p = extract_profile(self._raw(), {"awardCategory": "Azure, Security"})
         self.assertEqual(p["techAreas"], ["Azure", "Security"])
 
-    def test_missing_id_falls_back_to_userkey(self):
+    def test_tech_areas_fallback_to_technologyFocusArea(self):
+        p = extract_profile(self._raw(), {"technologyFocusArea": ["Cloud"]})
+        self.assertEqual(p["techAreas"], ["Cloud"])
+
+    def test_no_detail_returns_empty_tech_areas_and_zero_years(self):
+        p = extract_profile(self._raw())
+        self.assertEqual(p["techAreas"], [])
+        self.assertEqual(p["firstAwardYear"], 0)
+        self.assertEqual(p["consecutiveYears"], 0)
+
+    def test_missing_id_returns_empty(self):
         raw = self._raw()
-        del raw["mvpId"]
-        raw["userKey"] = "fallback-key"
+        del raw["userProfileIdentifier"]
         p = extract_profile(raw)
-        self.assertEqual(p["id"], "fallback-key")
+        self.assertEqual(p["id"], "")
+        self.assertEqual(p["profileUrl"], "")
 
     def test_missing_fields_return_empty_strings(self):
         p = extract_profile({})

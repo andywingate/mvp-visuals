@@ -4,10 +4,12 @@ the aggregated data to docs/data/mvps.json for use by the GitHub Pages
 visualisation site.
 
 Usage:
-    python scrape_mvps.py [--out PATH] [--top N] [--delay SECONDS]
+    python scrape_mvps.py [--out PATH] [--top N] [--delay SECONDS] [--no-enrich]
 
-The script pages through the Maven/MVP search API until it has fetched
-every profile or until the optional --top limit is reached.
+The script pages through the MVP CommunityLeaders search API until it has
+fetched every profile or until the optional --top limit is reached.  Each
+profile stub is then optionally enriched with a second API call to retrieve
+tech areas and years-in-program data (pass --no-enrich to skip enrichment).
 """
 
 import argparse
@@ -15,13 +17,15 @@ import json
 import os
 import time
 import sys
+import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-API_URL = (
-    "https://mavenapi-prod.azurewebsites.net/api/v2/search/Profiles"
-)
+SEARCH_URL = "https://mavenapi-prod.azurewebsites.net/api/CommunityLeaders/search/"
+PROFILE_URL = "https://mavenapi-prod.azurewebsites.net/api/mvp/UserProfiles/public/{}"
 DEFAULT_PAGE_SIZE = 100
+MAX_ENRICH_WORKERS = 5
 # Approximate current award year; update when a new MVP award year begins.
 CURRENT_YEAR = 2025
 DEFAULT_OUT = os.path.join(
@@ -30,6 +34,9 @@ DEFAULT_OUT = os.path.join(
 
 HEADERS = {
     "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Origin": "https://mvp.microsoft.com",
+    "Referer": "https://mvp.microsoft.com/",
     "User-Agent": (
         "Mozilla/5.0 (compatible; mvp-visuals-scraper/1.0; "
         "+https://github.com/andywingate/mvp-visuals)"
@@ -37,40 +44,78 @@ HEADERS = {
 }
 
 
-def fetch_page(skip: int, page_size: int, session: requests.Session) -> dict:
-    """Fetch one page of MVP search results."""
-    params = {
-        "$skip": skip,
-        "$top": page_size,
-        "searchText": "",
-        "program": "MVP",
-        "targetType": "Profile",
+def fetch_page(page_index: int, page_size: int, session: requests.Session) -> dict:
+    """Fetch one page of MVP search results (page_index is 1-based)."""
+    payload = {
+        "searchKey": "",
+        "program": ["MVP"],
+        "pageIndex": page_index,
+        "pageSize": page_size,
+        "countryRegionList": [],
+        "stateProvinceList": [],
+        "languagesList": [],
+        "technologyFocusAreaList": [],
     }
-    response = session.get(API_URL, params=params, headers=HEADERS, timeout=30)
+    response = session.post(SEARCH_URL, json=payload, headers=HEADERS, timeout=30)
     response.raise_for_status()
     return response.json()
 
 
-def extract_profile(raw: dict) -> dict:
-    """Extract the fields we care about from a raw API profile object."""
-    award_years = raw.get("awardRecognitionYear") or raw.get("firstAwardYear") or 0
-    consecutive = raw.get("numberOfConsecutiveAwards") or 0
+def fetch_profile_detail(profile_id: str, session: requests.Session) -> dict:
+    """Fetch detailed profile data for a single MVP by ID."""
+    url = PROFILE_URL.format(profile_id)
+    try:
+        resp = session.get(url, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("userProfile") or {}
+    except requests.RequestException:
+        return {}
 
-    # Technology areas may come back as a list or a comma-separated string
-    tech_areas = raw.get("awardCategoryCollection") or []
+
+def extract_profile(raw: dict, detail: dict | None = None) -> dict:
+    """Extract the fields we care about from a raw API profile stub and optional detail."""
+    profile_id = raw.get("userProfileIdentifier") or ""
+
+    # Build display name (prefer localized variant when the server flag is set)
+    if raw.get("screenNameLocalized"):
+        first = raw.get("localizedFirstName") or raw.get("firstName") or ""
+        last = raw.get("localizedLastName") or raw.get("lastName") or ""
+    else:
+        first = raw.get("firstName") or ""
+        last = raw.get("lastName") or ""
+    display_name = f"{first} {last}".strip()
+    # Some localized names are stored as "-" prefixed in the API; strip leading hyphens.
+    display_name = display_name.lstrip("-").strip()
+
+    detail = detail or {}
+
+    # Technology areas come from the detail endpoint (awardCategory is the primary field)
+    tech_areas = detail.get("awardCategory") or detail.get("technologyFocusArea") or []
     if isinstance(tech_areas, str):
         tech_areas = [t.strip() for t in tech_areas.split(",") if t.strip()]
 
+    years_in_program = detail.get("yearsInProgram") or 0
+    if isinstance(years_in_program, int) and years_in_program > 0:
+        first_award_year = CURRENT_YEAR - years_in_program + 1
+    else:
+        first_award_year = 0
+
+    profile_url = (
+        f"https://mvp.microsoft.com/en-US/mvp/profile/{profile_id}"
+        if profile_id
+        else ""
+    )
+
     return {
-        "id": raw.get("mvpId") or raw.get("userKey") or "",
-        "displayName": raw.get("displayName") or "",
-        "country": raw.get("country") or raw.get("countryRegionName") or "",
-        "stateOrProvince": raw.get("stateOrProvince") or "",
-        "city": raw.get("city") or "",
+        "id": profile_id,
+        "displayName": display_name,
+        "country": raw.get("addressCountryOrRegionName") or "",
+        "stateOrProvince": "",
+        "city": "",
         "techAreas": tech_areas,
-        "firstAwardYear": award_years,
-        "consecutiveYears": consecutive,
-        "profileUrl": raw.get("userUrl") or raw.get("mvpProfileUrl") or "",
+        "firstAwardYear": first_award_year,
+        "consecutiveYears": years_in_program,
+        "profileUrl": profile_url,
     }
 
 
@@ -78,24 +123,28 @@ def scrape(
     top: int | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     delay: float = 0.5,
+    enrich: bool = True,
 ) -> list[dict]:
-    """Page through the API and return a list of extracted profile dicts."""
-    profiles: list[dict] = []
-    skip = 0
+    """Page through the search API and return a list of extracted profile dicts."""
+    stubs: list[dict] = []
+    page_index = 1
     total = None
 
     with requests.Session() as session:
         while True:
             fetch_size = page_size
             if top is not None:
-                remaining = top - len(profiles)
+                remaining = top - len(stubs)
                 if remaining <= 0:
                     break
                 fetch_size = min(page_size, remaining)
 
-            print(f"Fetching records {skip}–{skip + fetch_size - 1} …", flush=True)
+            print(
+                f"Fetching page {page_index} ({fetch_size} profiles per page) …",
+                flush=True,
+            )
             try:
-                data = fetch_page(skip, fetch_size, session)
+                data = fetch_page(page_index, fetch_size, session)
             except requests.HTTPError as exc:
                 print(f"HTTP error: {exc}", file=sys.stderr)
                 break
@@ -103,28 +152,60 @@ def scrape(
                 print(f"Request error: {exc}", file=sys.stderr)
                 break
 
-            items = data.get("value") or data.get("profiles") or []
+            items = data.get("communityLeaderProfiles") or []
             if total is None:
-                total = data.get("totalCount") or data.get("@odata.count") or 0
+                total = data.get("filteredCount") or 0
                 print(f"Total profiles reported by API: {total}", flush=True)
 
             if not items:
                 break
 
-            for item in items:
-                profiles.append(extract_profile(item))
+            stubs.extend(items)
 
-            skip += len(items)
-
-            if total and skip >= total:
+            if total and len(stubs) >= total:
                 break
             if len(items) < fetch_size:
                 # API returned fewer items than requested → last page
                 break
 
+            page_index += 1
             time.sleep(delay)
 
-    return profiles
+    print(f"Collected {len(stubs)} profile stubs.", flush=True)
+
+    if not enrich:
+        return [extract_profile(stub) for stub in stubs]
+
+    # Enrich each stub with individual profile details (tech areas, years, etc.)
+    print(
+        f"Enriching {len(stubs)} profiles with detail data "
+        f"(concurrency={MAX_ENRICH_WORKERS}) …",
+        flush=True,
+    )
+
+    profiles: dict[int, dict] = {}
+
+    def _enrich(index_stub: tuple[int, dict]) -> tuple[int, dict]:
+        idx, stub = index_stub
+        pid = stub.get("userProfileIdentifier") or ""
+        with requests.Session() as s:
+            detail = fetch_profile_detail(pid, s) if pid else {}
+        return idx, extract_profile(stub, detail)
+
+    with ThreadPoolExecutor(max_workers=MAX_ENRICH_WORKERS) as executor:
+        futures = {
+            executor.submit(_enrich, (i, stub)): i
+            for i, stub in enumerate(stubs)
+        }
+        done = 0
+        for future in as_completed(futures):
+            idx, profile = future.result()
+            profiles[idx] = profile
+            done += 1
+            if done % 100 == 0 or done == len(stubs):
+                print(f"  Enriched {done}/{len(stubs)} profiles …", flush=True)
+
+    return [profiles[i] for i in range(len(stubs))]
 
 
 def build_summary(profiles: list[dict]) -> dict:
@@ -195,11 +276,25 @@ def main() -> None:
         "--delay",
         type=float,
         default=0.5,
-        help="Seconds to wait between API requests (default: 0.5)",
+        help="Seconds to wait between search-page API requests (default: 0.5)",
+    )
+    parser.add_argument(
+        "--no-enrich",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip per-profile detail calls (faster but omits tech areas "
+            "and years-in-program data)"
+        ),
     )
     args = parser.parse_args()
 
-    profiles = scrape(top=args.top, page_size=args.page_size, delay=args.delay)
+    profiles = scrape(
+        top=args.top,
+        page_size=args.page_size,
+        delay=args.delay,
+        enrich=not args.no_enrich,
+    )
     summary = build_summary(profiles)
 
     output = {
@@ -210,8 +305,7 @@ def main() -> None:
     }
 
     # Stamp the update time using a simple ISO-8601 string
-    import datetime
-    output["lastUpdated"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    output["lastUpdated"] = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
